@@ -1,9 +1,11 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useCallback } from 'react';
 import ImageUploader from './ImageUploader';
 import LightControls from './LightControls';
 import PreviewCanvas from './PreviewCanvas';
+import DebugImagesViewer from './DebugImagesViewer';
 import { generateShadow } from '../services/api';
 import { ImageFile, ShadowParams } from '../types';
+import JSZip from 'jszip';
 
 export default function ShadowGenerator() {
   const [foreground, setForeground] = useState<ImageFile | null>(null);
@@ -13,6 +15,13 @@ export default function ShadowGenerator() {
     lightElevation: 45,
   });
   const [resultUrl, setResultUrl] = useState<string | null>(null);
+  const [shadowOnlyUrl, setShadowOnlyUrl] = useState<string | null>(null);
+  const [maskDebugUrl, setMaskDebugUrl] = useState<string | null>(null);
+  const [resultBlobs, setResultBlobs] = useState<{
+    composite: Blob;
+    shadowOnly: Blob;
+    maskDebug: Blob;
+  } | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -25,22 +34,40 @@ export default function ShadowGenerator() {
     setError(null);
 
     try {
-      const blob = await generateShadow({
+      const result = await generateShadow({
         foreground: foreground.file,
         background: background.file,
         lightAngle: params.lightAngle,
         lightElevation: params.lightElevation,
       });
 
-      // Create object URL for the result
-      const url = URL.createObjectURL(blob);
+      // Store the blobs for ZIP download
+      setResultBlobs(result);
+
+      // Create object URLs for all three images
+      const compositeUrl = URL.createObjectURL(result.composite);
+      const shadowOnlyUrl = URL.createObjectURL(result.shadowOnly);
+      const maskDebugUrl = URL.createObjectURL(result.maskDebug);
       
-      // Clean up previous URL if exists
-      if (resultUrl) {
-        URL.revokeObjectURL(resultUrl);
-      }
-      
-      setResultUrl(url);
+      // Clean up previous URLs if they exist
+      setResultUrl((prevUrl) => {
+        if (prevUrl) {
+          URL.revokeObjectURL(prevUrl);
+        }
+        return compositeUrl;
+      });
+      setShadowOnlyUrl((prevUrl) => {
+        if (prevUrl) {
+          URL.revokeObjectURL(prevUrl);
+        }
+        return shadowOnlyUrl;
+      });
+      setMaskDebugUrl((prevUrl) => {
+        if (prevUrl) {
+          URL.revokeObjectURL(prevUrl);
+        }
+        return maskDebugUrl;
+      });
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'Failed to generate shadow';
       setError(errorMessage);
@@ -48,30 +75,49 @@ export default function ShadowGenerator() {
     } finally {
       setIsLoading(false);
     }
-  }, [foreground, background, params, resultUrl]);
-
-  // Debounced effect to regenerate shadow when inputs change
-  useEffect(() => {
-    if (!foreground || !background) {
-      return;
-    }
-
-    const timeoutId = setTimeout(() => {
-      generateShadowImage();
-    }, 500); // 500ms debounce
-
-    return () => clearTimeout(timeoutId);
-  }, [foreground, background, params, generateShadowImage]);
+  }, [foreground, background, params]);
 
   const handleDownload = () => {
     if (!resultUrl) return;
 
+    // Trigger download of the composite image
     const link = document.createElement('a');
     link.href = resultUrl;
-    link.download = 'shadow-result.png';
+    link.download = 'composite.png';
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+  };
+
+  const handleDownloadZip = async () => {
+    if (!resultBlobs) return;
+
+    try {
+      // Create a new ZIP file
+      const zip = new JSZip();
+      
+      // Add all three images to the ZIP
+      zip.file('composite.png', resultBlobs.composite);
+      zip.file('shadow_only.png', resultBlobs.shadowOnly);
+      zip.file('mask_debug.png', resultBlobs.maskDebug);
+      
+      // Generate the ZIP file
+      const zipBlob = await zip.generateAsync({ type: 'blob' });
+      
+      // Trigger download
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(zipBlob);
+      link.download = 'shadow_result.zip';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      
+      // Clean up the object URL
+      URL.revokeObjectURL(link.href);
+    } catch (err) {
+      console.error('Error creating ZIP file:', err);
+      setError('Failed to create ZIP file');
+    }
   };
 
   const handleGenerate = () => {
@@ -122,7 +168,15 @@ export default function ShadowGenerator() {
             isLoading={isLoading}
             error={error}
             onDownload={handleDownload}
+            onDownloadZip={handleDownloadZip}
+            hasResult={!!resultUrl}
           />
+          {resultUrl && (
+            <DebugImagesViewer
+              shadowOnlyUrl={shadowOnlyUrl}
+              maskDebugUrl={maskDebugUrl}
+            />
+          )}
         </div>
       </div>
     </div>

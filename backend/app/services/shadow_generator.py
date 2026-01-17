@@ -179,32 +179,46 @@ def generate_soft_shadow(
     
     dist_normalized = dist_transform / max_dist
     
-    # Create shadow with variable blur
-    # For efficiency, we'll apply blur in regions
+    # Calculate maximum blur radius - cap it to prevent excessive computation
+    # For large images, limit blur to reasonable values
+    calculated_max_blur = int(base_blur + max_dist * blur_factor)
+    max_blur = min(calculated_max_blur, 101)  # Cap at 101 (reasonable max for large images)
+    
+    # Apply blur in discrete steps for efficiency (instead of per-pixel)
+    # Use fewer blur levels to reduce computation
+    num_blur_levels = min(10, max_blur // 2 + 1)  # At most 10 blur levels
+    blur_levels = np.linspace(1, max_blur, num_blur_levels, dtype=int)
+    # Ensure odd numbers only for GaussianBlur
+    blur_levels = [(b + 1) if b % 2 == 0 else b for b in blur_levels]
+    blur_levels = sorted(list(set(blur_levels)))  # Remove duplicates and sort
+    
     h, w = shadow_mask.shape
     soft_shadow = np.zeros_like(shadow_mask, dtype=np.float32)
     
-    # Divide into regions based on distance and apply appropriate blur
-    max_blur = int(base_blur + max_dist * blur_factor)
-    
-    # Apply progressive blur
-    for blur_radius in range(1, max_blur + 1, 2):  # Odd numbers only
-        # Create mask for pixels at this distance range
-        dist_threshold_low = (blur_radius - 1) / max_blur
-        dist_threshold_high = blur_radius / max_blur
+    # Apply blur at discrete levels
+    prev_threshold = 0.0
+    for i, blur_radius in enumerate(blur_levels):
+        if blur_radius < 1:
+            continue
+            
+        # Determine distance threshold for this blur level
+        if i == len(blur_levels) - 1:
+            # Last level: everything beyond previous threshold
+            threshold = 1.0
+        else:
+            threshold = (i + 1) / len(blur_levels)
         
-        region_mask = (dist_normalized >= dist_threshold_low) & (dist_normalized < dist_threshold_high)
+        # Create mask for pixels in this distance range
+        region_mask = (dist_normalized >= prev_threshold) & (dist_normalized < threshold)
         
         if np.any(region_mask):
-            # Apply blur to this region
-            blurred = cv2.GaussianBlur(shadow_mask, (blur_radius * 2 + 1, blur_radius * 2 + 1), 0)
-            soft_shadow[region_mask] = blurred[region_mask].astype(float)
-    
-    # Handle remaining pixels (furthest)
-    furthest_mask = dist_normalized >= (max_blur / max_blur)
-    if np.any(furthest_mask):
-        blurred = cv2.GaussianBlur(shadow_mask, (max_blur * 2 + 1, max_blur * 2 + 1), 0)
-        soft_shadow[furthest_mask] = blurred[furthest_mask].astype(float)
+            # Apply blur once for this level
+            kernel_size = blur_radius * 2 + 1
+            if kernel_size > 0:
+                blurred = cv2.GaussianBlur(shadow_mask, (kernel_size, kernel_size), 0)
+                soft_shadow[region_mask] = blurred[region_mask].astype(float)
+        
+        prev_threshold = threshold
     
     # Apply opacity decay with distance
     opacity = np.exp(-dist_normalized * opacity_decay * 20)

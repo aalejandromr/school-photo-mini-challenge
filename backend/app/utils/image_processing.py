@@ -1,6 +1,7 @@
 from PIL import Image
 import numpy as np
 import cv2
+from io import BytesIO
 
 
 def resize_to_fit(image: Image.Image, target_size: tuple[int, int], maintain_aspect: bool = True) -> Image.Image:

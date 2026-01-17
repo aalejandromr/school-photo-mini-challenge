@@ -3,6 +3,8 @@ interface PreviewCanvasProps {
   isLoading: boolean;
   error: string | null;
   onDownload?: () => void;
+  onDownloadZip?: () => void;
+  hasResult?: boolean;
 }
 
 export default function PreviewCanvas({
@@ -10,6 +12,8 @@ export default function PreviewCanvas({
   isLoading,
   error,
   onDownload,
+  onDownloadZip,
+  hasResult = false,
 }: PreviewCanvasProps) {
   if (error) {
     return (
@@ -57,10 +61,19 @@ export default function PreviewCanvas({
     <div className="preview-canvas">
       <div className="preview-image-container">
         <img src={imageUrl} alt="Shadow preview" />
-        {onDownload && (
-          <button className="download-button" onClick={onDownload} type="button">
-            Download Result
-          </button>
+        {hasResult && (
+          <div className="download-buttons">
+            {onDownload && (
+              <button className="download-button" onClick={onDownload} type="button">
+                Download Composite
+              </button>
+            )}
+            {onDownloadZip && (
+              <button className="download-zip-button" onClick={onDownloadZip} type="button">
+                Download ZIP (All 3 Images)
+              </button>
+            )}
+          </div>
         )}
       </div>
     </div>

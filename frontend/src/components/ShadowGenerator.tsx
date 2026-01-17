@@ -2,7 +2,6 @@ import { useState, useCallback } from 'react';
 import ImageUploader from './ImageUploader';
 import LightControls from './LightControls';
 import PreviewCanvas from './PreviewCanvas';
-import DebugImagesViewer from './DebugImagesViewer';
 import { generateShadow } from '../services/api';
 import { ImageFile, ShadowParams } from '../types';
 import JSZip from 'jszip';
@@ -15,8 +14,6 @@ export default function ShadowGenerator() {
     lightElevation: 45,
   });
   const [resultUrl, setResultUrl] = useState<string | null>(null);
-  const [shadowOnlyUrl, setShadowOnlyUrl] = useState<string | null>(null);
-  const [maskDebugUrl, setMaskDebugUrl] = useState<string | null>(null);
   const [resultBlobs, setResultBlobs] = useState<{
     composite: Blob;
     shadowOnly: Blob;
@@ -46,8 +43,6 @@ export default function ShadowGenerator() {
 
       // Create object URLs for all three images
       const compositeUrl = URL.createObjectURL(result.composite);
-      const shadowOnlyUrl = URL.createObjectURL(result.shadowOnly);
-      const maskDebugUrl = URL.createObjectURL(result.maskDebug);
       
       // Clean up previous URLs if they exist
       setResultUrl((prevUrl) => {
@@ -55,18 +50,6 @@ export default function ShadowGenerator() {
           URL.revokeObjectURL(prevUrl);
         }
         return compositeUrl;
-      });
-      setShadowOnlyUrl((prevUrl) => {
-        if (prevUrl) {
-          URL.revokeObjectURL(prevUrl);
-        }
-        return shadowOnlyUrl;
-      });
-      setMaskDebugUrl((prevUrl) => {
-        if (prevUrl) {
-          URL.revokeObjectURL(prevUrl);
-        }
-        return maskDebugUrl;
       });
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'Failed to generate shadow';
@@ -129,8 +112,7 @@ export default function ShadowGenerator() {
   return (
     <div className="shadow-generator">
       <header className="app-header">
-        <h1>🎨 Realistic Shadow Generator</h1>
-        <p>Create realistic shadows with directional light control</p>
+        <h1> Realistic Shadow Generator</h1>
       </header>
 
       <div className="generator-container">
@@ -171,12 +153,6 @@ export default function ShadowGenerator() {
             onDownloadZip={handleDownloadZip}
             hasResult={!!resultUrl}
           />
-          {resultUrl && (
-            <DebugImagesViewer
-              shadowOnlyUrl={shadowOnlyUrl}
-              maskDebugUrl={maskDebugUrl}
-            />
-          )}
         </div>
       </div>
     </div>

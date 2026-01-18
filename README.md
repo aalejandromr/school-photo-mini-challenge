@@ -90,4 +90,6 @@ The API returns a ZIP file containing:
 
 ## Preview
 
-You can preview this work using the following link. Otherwise continue with the local set up.
+You can preview the result with the provided `composite.png`.
+
+To view shadow and mask download and unzip the `shadow_result.zip`

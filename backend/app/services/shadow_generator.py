@@ -230,6 +230,171 @@ def generate_soft_shadow(
     return soft_shadow
 
 
+def warp_shadow_with_depth_mesh(
+    shadow_mask: np.ndarray,
+    depth_map: np.ndarray,
+    light_angle: float,
+    light_elevation: float,
+    warp_strength: float = 0.3,
+    grid_size: int = 20
+) -> np.ndarray:
+    """
+    Warp shadow using mesh-based deformation. Creates a grid of control points
+    and deforms each mesh cell based on depth map gradients.
+    
+    Args:
+        shadow_mask: Binary shadow mask
+        depth_map: Depth map (0-255, higher = closer objects)
+        light_angle: Light angle in degrees (0-360)
+        light_elevation: Light elevation in degrees (0-90)
+        warp_strength: Strength of warping effect (0.0-1.0)
+        grid_size: Size of mesh grid cells (smaller = finer deformation)
+        
+    Returns:
+        Warped shadow mask
+    """
+    h, w = shadow_mask.shape
+    
+    # Ensure depth_map matches shadow dimensions
+    if depth_map.shape != shadow_mask.shape:
+        depth_map = cv2.resize(depth_map, (w, h), interpolation=cv2.INTER_LINEAR)
+    
+    angle_rad = angle_to_radians(light_angle)
+    depth_normalized = depth_map.astype(float) / 255.0
+    
+    # Calculate depth gradients (surface normals)
+    depth_grad_x = cv2.Sobel(depth_map, cv2.CV_64F, 1, 0, ksize=5)
+    depth_grad_y = cv2.Sobel(depth_map, cv2.CV_64F, 0, 1, ksize=5)
+    grad_magnitude = np.sqrt(depth_grad_x**2 + depth_grad_y**2) + 1e-6
+    
+    # Precompute max_grad_magnitude once (outside loop)
+    max_grad_magnitude = np.max(grad_magnitude)
+    
+    # Normalize gradients to get direction
+    grad_x_norm = depth_grad_x / grad_magnitude
+    grad_y_norm = depth_grad_y / grad_magnitude
+    
+    # Calculate perpendicular direction (where shadow flows around edges)
+    perp_x = -grad_y_norm
+    perp_y = grad_x_norm
+    
+    # Light direction
+    light_dir_x = np.cos(angle_rad)
+    light_dir_y = np.sin(angle_rad)
+    
+    # Create mesh grid of control points
+    # Sample at grid_size intervals
+    grid_x = np.arange(0, w, grid_size)
+    grid_y = np.arange(0, h, grid_size)
+    
+    # Add edges
+    if grid_x[-1] < w - 1:
+        grid_x = np.append(grid_x, w - 1)
+    if grid_y[-1] < h - 1:
+        grid_y = np.append(grid_y, h - 1)
+    
+    # Create mesh of control points (original positions)
+    mesh_x_orig, mesh_y_orig = np.meshgrid(grid_x, grid_y)
+    
+    # Calculate displacement for each control point based on depth
+    mesh_displacement_x = np.zeros_like(mesh_x_orig, dtype=float)
+    mesh_displacement_y = np.zeros_like(mesh_y_orig, dtype=float)
+    
+    max_displacement = warp_strength * 150
+    
+    for i in range(mesh_x_orig.shape[0]):
+        for j in range(mesh_x_orig.shape[1]):
+            x = int(mesh_x_orig[i, j])
+            y = int(mesh_y_orig[i, j])
+            
+            if x >= w or y >= h:
+                continue
+            
+            # Get depth and gradient at this control point
+            depth_val = depth_normalized[y, x]
+            edge_strength = grad_magnitude[y, x] / (max_grad_magnitude + 1e-6)
+            
+            # Calculate flow direction: blend perpendicular to gradient with light direction
+            perp_val_x = perp_x[y, x]
+            perp_val_y = perp_y[y, x]
+            
+            # Blend based on edge strength
+            blend = min(edge_strength * 2.0, 1.0)
+            flow_x = perp_val_x * blend + light_dir_x * (1 - blend)
+            flow_y = perp_val_y * blend + light_dir_y * (1 - blend)
+            
+            # Calculate displacement magnitude based on depth
+            displacement_mag = depth_val * max_displacement * (1 + edge_strength)
+            
+            mesh_displacement_x[i, j] = flow_x * displacement_mag
+            mesh_displacement_y[i, j] = flow_y * displacement_mag
+    
+    # Create deformed mesh (original + displacement)
+    mesh_x_deformed = mesh_x_orig + mesh_displacement_x
+    mesh_y_deformed = mesh_y_orig + mesh_displacement_y
+    
+    # Create full-resolution displacement maps using bilinear interpolation
+    # from the mesh control points (using OpenCV resize for interpolation)
+    # Resize mesh displacements to full image resolution using bilinear interpolation
+    mesh_h, mesh_w = mesh_displacement_x.shape
+    
+    displacement_x_full = cv2.resize(mesh_displacement_x.astype(np.float32), (w, h), 
+                                     interpolation=cv2.INTER_LINEAR)
+    displacement_y_full = cv2.resize(mesh_displacement_y.astype(np.float32), (w, h),
+                                     interpolation=cv2.INTER_LINEAR)
+    
+    # Create coordinate meshgrid for remapping
+    x_coords, y_coords = np.meshgrid(np.arange(w), np.arange(h))
+    
+    # Apply displacement using remap
+    map_x = (x_coords + displacement_x_full).astype(np.float32)
+    map_y = (y_coords + displacement_y_full).astype(np.float32)
+    
+    # Clamp map values to valid range for cv2.remap
+    # OpenCV remap expects values within image bounds or slightly outside
+    map_x = np.clip(map_x, -1e6, 1e6).astype(np.float32)
+    map_y = np.clip(map_y, -1e6, 1e6).astype(np.float32)
+    # Replace NaN/Inf with 0
+    map_x = np.nan_to_num(map_x, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
+    map_y = np.nan_to_num(map_y, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
+    
+    # Remap shadow using deformed mesh
+    warped_shadow = cv2.remap(
+        shadow_mask.astype(np.float32),
+        map_x,
+        map_y,
+        interpolation=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=0
+    )
+    
+    return warped_shadow.astype(np.uint8)
+
+
+def warp_shadow_with_depth(
+    shadow_mask: np.ndarray,
+    depth_map: np.ndarray,
+    light_angle: float,
+    light_elevation: float,
+    warp_strength: float = 0.3
+) -> np.ndarray:
+    """
+    Warp shadow based on depth map using mesh-based deformation.
+    
+    Args:
+        shadow_mask: Binary shadow mask
+        depth_map: Depth map (0-255, higher = closer objects)
+        light_angle: Light angle in degrees (0-360)
+        light_elevation: Light elevation in degrees (0-90)
+        warp_strength: Strength of warping effect (0.0-1.0)
+        
+    Returns:
+        Warped shadow mask
+    """
+    # Use mesh-based deformation for better curvature effects
+    return warp_shadow_with_depth_mesh(shadow_mask, depth_map, light_angle, light_elevation, warp_strength)
+
+
 def generate_realistic_shadow(
     subject_mask: np.ndarray,
     light_angle: float,
@@ -237,7 +402,9 @@ def generate_realistic_shadow(
     contact_decay: float = 0.1,
     soft_blur_base: int = 3,
     soft_blur_factor: float = 0.5,
-    soft_opacity_decay: float = 0.05
+    soft_opacity_decay: float = 0.05,
+    ground_mask: Optional[np.ndarray] = None,
+    depth_map: Optional[np.ndarray] = None
 ) -> np.ndarray:
     """
     Generate complete realistic shadow with contact and soft components.
@@ -250,6 +417,10 @@ def generate_realistic_shadow(
         soft_blur_base: Base blur radius for soft shadow
         soft_blur_factor: Blur increase factor
         soft_opacity_decay: Opacity decay factor for soft shadow
+        ground_mask: Optional binary mask of ground regions (255=ground, 0=sky).
+                     If provided, shadows will only appear on ground regions.
+        depth_map: Optional depth map for shadow warping (0-255, higher = closer objects).
+                   If provided, shadow will warp around background objects.
         
     Returns:
         Complete shadow mask with realistic falloff
@@ -290,5 +461,28 @@ def generate_realistic_shadow(
     
     # Ensure shadow only exists where projected mask exists
     combined = np.minimum(combined, shadow_projected)
+    
+    # Apply depth-based warping if depth map is provided
+    if depth_map is not None:
+        # Use stronger warp strength for more visible effect - single call only
+        combined = warp_shadow_with_depth(combined, depth_map, light_angle, light_elevation, warp_strength=0.8)
+        # Re-apply projected mask constraint after warping
+        combined = np.minimum(combined, shadow_projected)
+    
+    # Apply ground mask if provided to prevent shadows in sky regions
+    if ground_mask is not None:
+        # Ensure ground_mask matches shadow dimensions (resize if needed)
+        if ground_mask.shape != combined.shape:
+            ground_mask_resized = cv2.resize(ground_mask, (combined.shape[1], combined.shape[0]), 
+                                            interpolation=cv2.INTER_LINEAR)
+        else:
+            ground_mask_resized = ground_mask
+        
+        # Convert ground_mask to binary (values > 128 = ground)
+        ground_binary = (ground_mask_resized > 128).astype(np.uint8) * 255
+        
+        # Apply mask: zero out shadow pixels that fall on sky regions
+        combined = combined.astype(float) * (ground_binary.astype(float) / 255.0)
+        combined = combined.astype(np.uint8)
     
     return combined

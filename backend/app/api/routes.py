@@ -1,7 +1,8 @@
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 from PIL import Image
 import numpy as np
+import cv2
 from io import BytesIO
 import asyncio
 import logging
@@ -10,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from app.services.subject_extraction import extract_subject, get_subject_mask
 from app.services.shadow_generator import generate_realistic_shadow
-from app.utils.image_processing import composite_images, image_to_bytes
+from app.utils.image_processing import composite_images, image_to_bytes, detect_ground_regions, estimate_depth_map
 
 # Thread pool for CPU-intensive operations
 executor = ThreadPoolExecutor(max_workers=2)
@@ -73,6 +74,28 @@ async def generate_shadow(
             logger.warning("No subject detected in foreground image")
             raise HTTPException(status_code=400, detail="No subject detected in foreground image")
         
+        # Analyze background to detect ground regions and depth map (run in thread pool to avoid blocking)
+        try:
+            logger.info("Analyzing background for ground/sky regions and depth map...")
+            def analyze_background(bg_img):
+                return detect_ground_regions(bg_img), estimate_depth_map(bg_img)
+            ground_mask, depth_map = await asyncio.get_event_loop().run_in_executor(
+                executor, analyze_background, background_img
+            )
+            # Resize ground_mask to match subject_mask dimensions if they differ
+            if ground_mask.shape != subject_mask.shape:
+                ground_mask = cv2.resize(ground_mask, (subject_mask.shape[1], subject_mask.shape[0]), 
+                                        interpolation=cv2.INTER_LINEAR)
+            # Resize depth_map to match subject_mask dimensions if they differ
+            if depth_map.shape != subject_mask.shape:
+                depth_map = cv2.resize(depth_map, (subject_mask.shape[1], subject_mask.shape[0]), 
+                                      interpolation=cv2.INTER_LINEAR)
+            logger.info("Background analysis completed")
+        except Exception as e:
+            logger.warning(f"Failed to analyze background, continuing without ground mask and depth map: {str(e)}")
+            ground_mask = None  # Continue without ground mask if analysis fails
+            depth_map = None  # Continue without depth map if analysis fails
+        
         # Generate shadow (run in thread pool to avoid blocking)
         try:
             logger.info(f"Generating shadow - angle: {light_angle}°, elevation: {light_elevation}°")
@@ -81,7 +104,13 @@ async def generate_shadow(
                 generate_realistic_shadow,
                 subject_mask,
                 light_angle,
-                light_elevation
+                light_elevation,
+                0.1,  # contact_decay
+                3,    # soft_blur_base
+                0.5,  # soft_blur_factor
+                0.05, # soft_opacity_decay
+                ground_mask,  # ground_mask parameter
+                depth_map  # depth_map parameter for shadow warping
             )
             logger.info("Shadow generation completed")
         except Exception as e:
@@ -147,11 +176,31 @@ async def generate_shadow(
             
             logger.info(f"Returning ZIP file - {len(zip_bytes)} bytes")
             
-            return Response(
-                content=zip_bytes,
+            # Use StreamingResponse for large files to avoid memory issues
+            # Create BytesIO buffer for streaming
+            zip_buffer_stream = BytesIO(zip_bytes)
+            
+            def generate_zip_response():
+                """Generator function to stream ZIP bytes in chunks from BytesIO"""
+                chunk_size = 8192  # 8KB chunks
+                zip_buffer_stream.seek(0)  # Reset to beginning
+                while True:
+                    chunk = zip_buffer_stream.read(chunk_size)
+                    if not chunk:
+                        break
+                    yield chunk
+                zip_buffer_stream.close()
+            
+            response = StreamingResponse(
+                generate_zip_response(),
                 media_type="application/zip",
-                headers={"Content-Disposition": "attachment; filename=shadow_result.zip"}
+                headers={
+                    "Content-Disposition": "attachment; filename=shadow_result.zip",
+                    "Content-Length": str(len(zip_bytes))
+                }
             )
+            
+            return response
         except Exception as e:
             logger.error(f"Failed to create ZIP file: {str(e)}")
             raise HTTPException(status_code=500, detail=f"Failed to create ZIP file: {str(e)}")
